@@ -1,0 +1,1219 @@
+// Central Partner — data model (spec v1.1, Parte 4).
+// Multi-tenancy: every tenant-owned table carries workspaceId; the API scopes
+// every query by it. Soft delete: deletedAt NULL = active.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  JEFE_AREA
+  USER
+  VIEWER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// Area/KPI semaphore: GREEN >= 90%, YELLOW 70-89%, RED < 70%.
+// Task semaphore is date-based and computed on read (never stored):
+// GREEN = 100%, RED = its day passed, YELLOW = due today, GRAY = not due yet.
+enum Semaphore {
+  GREEN
+  YELLOW
+  RED
+  GRAY
+}
+
+enum TaskSourceType {
+  MANUAL
+  EXCEL_IMPORT
+  // Created by the system (the monthly "Exponer resultados del mes" task).
+  SYSTEM
+}
+
+enum WeekStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum KpiType {
+  RESULT
+  COMPLIANCE
+  PROGRESS
+}
+
+enum FunctionFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  WHEN_OCCURS
+  WHEN_CHANGES
+}
+
+enum FunctionFulfillment {
+  YES
+  PARTIAL
+  NO
+  NOT_APPLICABLE
+}
+
+enum ExcelImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum SnapshotPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+}
+
+enum ComplexityCategory {
+  SIMPLE
+  STANDARD
+  COMPLEX
+  CRITICAL
+}
+
+enum DeadlineAdherence {
+  EARLY
+  ON_TIME
+  LATE
+  NO_DEADLINE
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  MENTIONED
+  COMMENT_REPLY
+  TASK_BLOCKED
+  TASK_COMPLETED
+  KPI_REMINDER
+  // "Tu semana está lista" to area heads when a week starts.
+  WEEK_STARTED
+  // An evaluation to fill (self-assessment or manager review).
+  SURVEY_ASSIGNED
+  // A published performance review changed because another survey of its quarter arrived (CR-04).
+  RESULT_RECALCULATED
+}
+
+// ─── Workspace & branding ───────────────────────────────────────────────────
+
+model Workspace {
+  id                  String    @id @default(uuid()) @db.Uuid
+  name                String    @db.VarChar(50)
+  slug                String    @unique @db.VarChar(80)
+  // IANA zone that defines the workspace's weeks (Monday-Saturday) and "today".
+  timezone            String    @default("America/Lima") @db.VarChar(50)
+  // Shown in Settings > Workspace; where people can reach the company.
+  contactEmail        String?   @db.VarChar(254)
+  // Confirmación E: soft delete + 30-day grace period before hard delete.
+  deleteRequestedAt   DateTime?
+  deleteRequestedById String?   @db.Uuid
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+
+  branding             WorkspaceBranding?
+  departments          Department[]
+  users                User[]
+  invitations          Invitation[]
+  sessions             Session[]
+  departmentVisibility DepartmentVisibility[]
+  notificationPrefs    UserNotificationPreferences[]
+  tasks                Task[]
+  taskDependencies     TaskDependency[]
+  comments             Comment[]
+  files                TaskFile[]
+  notifications        Notification[]
+  whatsAppLogs         WhatsAppNotificationLog[]
+  activityLogs         ActivityLog[]
+  weeklyArchives       WeeklyArchive[]
+  excelImports         ExcelImport[]
+  performanceSnapshots UserPerformanceSnapshot[]
+  taskMetrics          TaskPerformanceMetric[]
+  webhooks             Webhook[]
+  weeks                Week[]
+  kpis                 Kpi[]
+  functions            DepartmentFunction[]
+  taskObservations     TaskObservation[]
+  surveyTemplates      SurveyTemplate[]
+  surveys              Survey[]
+  performanceReviews   PerformanceReview[]
+  okrs                 Okr[]
+  weeklyReports        WeeklyReport[]
+  kpiSnapshots         WeekKpiSnapshot[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceBranding {
+  id            String   @id @default(uuid()) @db.Uuid
+  workspaceId   String   @unique @db.Uuid
+  logoUrl       String?
+  // Storage key of the current logo; logoUrl is the public, cache-busted API path to it.
+  logoKey       String?  @db.VarChar(512)
+  colorPrimary  String   @default("#2563EB") @db.VarChar(7)
+  colorSuccess  String   @default("#10B981") @db.VarChar(7)
+  colorWarning  String   @default("#F59E0B") @db.VarChar(7)
+  colorDanger   String   @default("#EF4444") @db.VarChar(7)
+  workspaceName String   @default("Central Partner") @db.VarChar(50)
+  tagline       String?  @db.VarChar(100)
+  createdAt     DateTime @default(now())
+  // Last-Write-Wins key for concurrent branding edits (Gap 2).
+  updatedAt     DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("workspace_branding")
+}
+
+// ─── Departments & users ────────────────────────────────────────────────────
+
+model Department {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  name        String    @db.VarChar(80)
+  slug        String    @db.VarChar(100)
+  color       String?   @db.VarChar(7)
+  description String?   @db.VarChar(500)
+  headId      String?   @db.Uuid
+  // Performance goal of the area for the scorecard (0–100); null = the default 80.
+  performanceTarget Int?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  workspace   Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  head        User?                     @relation("DepartmentHead", fields: [headId], references: [id], onDelete: SetNull)
+  members     User[]                    @relation("DepartmentMembers")
+  tasks       Task[]
+  invitations Invitation[]
+  snapshots   UserPerformanceSnapshot[]
+  taskMetrics TaskPerformanceMetric[]
+  kpis        Kpi[]
+  functions   DepartmentFunction[]
+  surveys     Survey[]
+  reviews     PerformanceReview[]
+  okrs        Okr[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, deletedAt])
+  @@map("departments")
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  workspaceId    String    @db.Uuid
+  email          String    @db.VarChar(254)
+  passwordHash   String
+  displayName    String    @db.VarChar(100)
+  role           Role      @default(USER)
+  // Task creation: ADMIN always; JEFE_AREA only when the director grants this;
+  // everyone else never. Always false for roles other than JEFE_AREA.
+  canCreateTasks Boolean   @default(false)
+  departmentId   String?   @db.Uuid
+  phoneNumber    String?   @db.VarChar(20)
+  // IANA timezone (Gap 14). Single source of truth; preferences read it from here.
+  timezone       String    @default("UTC") @db.VarChar(50)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  department Department? @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+
+  headOfDepartments    Department[]                 @relation("DepartmentHead")
+  sessions             Session[]
+  passwordResets       PasswordResetToken[]
+  invitationsSent      Invitation[]                 @relation("InvitedBy")
+  visibility           DepartmentVisibility?
+  notificationPrefs    UserNotificationPreferences?
+  assignedTasks        Task[]                       @relation("TaskAssignee")
+  createdTasks         Task[]                       @relation("TaskCreator")
+  blockedTasks         Task[]                       @relation("TaskBlocker")
+  comments             Comment[]
+  uploadedFiles        TaskFile[]
+  notifications        Notification[]
+  whatsAppLogs         WhatsAppNotificationLog[]
+  activityLogs         ActivityLog[]
+  excelImports         ExcelImport[]
+  taskObservations     TaskObservation[]
+  performanceSnapshots UserPerformanceSnapshot[]
+  assignedTaskMetrics  TaskPerformanceMetric[]      @relation("MetricAssignee")
+  createdTaskMetrics   TaskPerformanceMetric[]      @relation("MetricCreator")
+  surveyTemplates      SurveyTemplate[]
+  surveysToFill        Survey[]                     @relation("SurveyEvaluator")
+  surveysAboutMe       Survey[]                     @relation("SurveyEvaluated")
+  surveysCreated       Survey[]                     @relation("SurveyCreator")
+  surveyResponses      SurveyResponse[]
+  performanceReviews   PerformanceReview[]          @relation("ReviewSubject")
+  reviewsPublished     PerformanceReview[]          @relation("ReviewPublisher")
+  okrsOwned            Okr[]                        @relation("OkrOwner")
+  okrsCreated          Okr[]                        @relation("OkrCreator")
+  okrCheckIns          OkrCheckIn[]
+  reportsGenerated     WeeklyReport[]               @relation("ReportGenerator")
+  reportsDeleted       WeeklyReport[]               @relation("ReportDeleter")
+
+  @@unique([workspaceId, email])
+  @@index([email])
+  @@index([workspaceId, departmentId])
+  @@map("users")
+}
+
+// Confirmación D: invitation link valid for 24 hours. Only the token hash is stored.
+model Invitation {
+  id             String    @id @default(uuid()) @db.Uuid
+  workspaceId    String    @db.Uuid
+  email          String    @db.VarChar(254)
+  role           Role
+  // Carried over to the user on acceptance (JEFE_AREA only).
+  canCreateTasks Boolean   @default(false)
+  departmentId   String?   @db.Uuid
+  phoneNumber    String?   @db.VarChar(20)
+  tokenHash      String    @unique @db.VarChar(64)
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  invitedById    String    @db.Uuid
+  createdAt      DateTime  @default(now())
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  invitedBy  User        @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, email])
+  @@map("invitations")
+}
+
+// A login session. Access tokens carry the session id, so revoking the session
+// (logout, password reset) invalidates them immediately.
+model Session {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  workspaceId String    @db.Uuid
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  lastUsedAt  DateTime  @default(now())
+  userAgent   String?   @db.VarChar(255)
+  ipAddress   String?   @db.VarChar(64)
+  createdAt   DateTime  @default(now())
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Rotating refresh tokens. Presenting an already-used token = reuse → session revoked.
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  sessionId String    @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// If a JEFE_AREA has a row here they see exactly visibleDepartmentIds (plus
+// their own); without a row they see only their own department.
+model DepartmentVisibility {
+  id                   String   @id @default(uuid()) @db.Uuid
+  workspaceId          String   @db.Uuid
+  jefeAreaId           String   @unique @db.Uuid
+  visibleDepartmentIds String[] @db.Uuid
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  jefeArea  User      @relation(fields: [jefeAreaId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, jefeAreaId])
+  @@map("department_visibility")
+}
+
+model UserNotificationPreferences {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  userId          String   @unique @db.Uuid
+  enableWhatsApp  Boolean  @default(false)
+  // Per-event WhatsApp toggles, e.g. { "MENTIONED": true, "TASK_BLOCKED": false }.
+  // Missing key = enabled.
+  whatsAppEvents  Json     @default("{}")
+  // "HH:mm" in the user's timezone; both null = no quiet hours (21:00 cutoff still applies).
+  quietHoursStart String?  @db.VarChar(5)
+  quietHoursEnd   String?  @db.VarChar(5)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@map("user_notification_preferences")
+}
+
+// ─── Tasks ──────────────────────────────────────────────────────────────────
+
+model Task {
+  id           String     @id @default(uuid()) @db.Uuid
+  workspaceId  String     @db.Uuid
+  departmentId String     @db.Uuid
+  // Confirmación A: exactly one assignee.
+  assignedToId String?    @db.Uuid
+  createdById  String     @db.Uuid
+  parentTaskId String?    @db.Uuid
+  title        String     @db.VarChar(255)
+  description  String?
+  status       TaskStatus @default(TODO)
+  priority     Priority   @default(MEDIUM)
+  progress     Int        @default(0)
+  // The task's day. Its week is the one containing it (undated tasks count as
+  // due on their week's Saturday). The semaphore is derived from it on read.
+  dueDate      DateTime?
+  weekId       String?    @db.Uuid
+  // First week of a task carried over unfinished ("Viene de Sem. NN").
+  carriedFromWeekId String? @db.Uuid
+
+  blockReason     String?   @db.VarChar(255)
+  blockedSince    DateTime?
+  blockedByUserId String?   @db.Uuid
+
+  kpiTarget     String?   @db.VarChar(255)
+  kpiActual     String?   @db.VarChar(255)
+  kpiRecordedAt DateTime?
+
+  sourceType    TaskSourceType @default(MANUAL)
+  excelImportId String?        @db.Uuid
+
+  // Performance extension
+  actualStartDate             DateTime?
+  actualCompletionDate        DateTime?
+  actualDurationHours         Float?
+  timeToCompletionHours       Float?
+  completionDelayDays         Float?
+  wasBlocked                  Boolean   @default(false)
+  totalCommentsCount          Int       @default(0)
+  totalMentionsCount          Int       @default(0)
+  collaborationParticipantIds String[]  @db.Uuid
+  priorityAtCompletion        Priority?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  department  Department   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  assignedTo  User?        @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdBy   User         @relation("TaskCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  blockedBy   User?        @relation("TaskBlocker", fields: [blockedByUserId], references: [id], onDelete: SetNull)
+  parentTask  Task?        @relation("SubTasks", fields: [parentTaskId], references: [id], onDelete: SetNull)
+  subTasks    Task[]       @relation("SubTasks")
+  excelImport ExcelImport? @relation(fields: [excelImportId], references: [id], onDelete: SetNull)
+  week        Week?        @relation("WeekTasks", fields: [weekId], references: [id], onDelete: SetNull)
+  carriedFrom Week?        @relation("CarriedTasks", fields: [carriedFromWeekId], references: [id], onDelete: SetNull)
+  observations TaskObservation[]
+
+  dependencies  TaskDependency[]       @relation("DependentTask")
+  dependents    TaskDependency[]       @relation("PrerequisiteTask")
+  comments      Comment[]
+  files         TaskFile[]
+  notifications Notification[]
+  metric        TaskPerformanceMetric?
+
+  @@index([workspaceId, deletedAt, departmentId, status])
+  @@index([workspaceId, assignedToId])
+  @@index([workspaceId, dueDate])
+  @@index([workspaceId, createdAt])
+  @@index([parentTaskId])
+  @@index([weekId, departmentId])
+  @@map("tasks")
+}
+
+// "taskId depends on dependsOnTaskId". Cycles are rejected in the API (Gap 8, DFS).
+model TaskDependency {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  taskId          String   @db.Uuid
+  dependsOnTaskId String   @db.Uuid
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task      Task      @relation("DependentTask", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn Task      @relation("PrerequisiteTask", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dependsOnTaskId])
+  @@index([workspaceId])
+  @@map("task_dependencies")
+}
+
+model Comment {
+  id               String    @id @default(uuid()) @db.Uuid
+  workspaceId      String    @db.Uuid
+  taskId           String    @db.Uuid
+  authorId         String    @db.Uuid
+  content          String
+  mentionedUserIds String[]  @db.Uuid
+  editedAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, createdAt])
+  @@map("comments")
+}
+
+// Max 10 per task, 50MB per file (validated in the API).
+model TaskFile {
+  id           String    @id @default(uuid()) @db.Uuid
+  workspaceId  String    @db.Uuid
+  taskId       String    @db.Uuid
+  uploadedById String    @db.Uuid
+  filename     String    @db.VarChar(255)
+  mimeType     String    @db.VarChar(127)
+  sizeBytes    Int
+  storageKey   String    @db.VarChar(512)
+  createdAt    DateTime  @default(now())
+  // Soft-deleted with its task; hard-deleted by the weekly job after 90 days (Gap 9).
+  deletedAt    DateTime?
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task       Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploadedBy User      @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([taskId])
+  @@index([deletedAt])
+  @@map("task_files")
+}
+
+// In-app notifications (badge + dropdown).
+model Notification {
+  id          String           @id @default(uuid()) @db.Uuid
+  workspaceId String           @db.Uuid
+  userId      String           @db.Uuid
+  type        NotificationType
+  title       String           @db.VarChar(255)
+  body        String?          @db.VarChar(1000)
+  taskId      String?          @db.Uuid
+  actorId     String?          @db.Uuid
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task      Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+enum WhatsAppDeliveryStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// One row per WhatsApp attempt. Also the source for the 5-minute per-task rate limit.
+model WhatsAppNotificationLog {
+  id          String                 @id @default(uuid()) @db.Uuid
+  workspaceId String                 @db.Uuid
+  userId      String                 @db.Uuid
+  taskId      String?                @db.Uuid
+  phoneNumber String                 @db.VarChar(20)
+  type        NotificationType
+  status      WhatsAppDeliveryStatus
+  // Why it was skipped (RATE_LIMITED, QUIET_HOURS, …) or the provider error.
+  reason      String?                @db.VarChar(500)
+  providerId  String?                @db.VarChar(64)
+  createdAt   DateTime               @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, taskId, createdAt])
+  @@map("whatsapp_notification_logs")
+}
+
+// ─── Audit & history ────────────────────────────────────────────────────────
+
+// who / what / when / old / new. Append-only.
+model ActivityLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  userId      String?  @db.Uuid
+  action      String   @db.VarChar(64)
+  entityType  String   @db.VarChar(64)
+  entityId    String?  @db.Uuid
+  // { field: { old, new } }
+  changes     Json?
+  metadata    Json?
+  ipAddress   String?  @db.VarChar(64)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, entityType, entityId])
+  @@index([workspaceId, userId])
+  @@map("activity_logs")
+}
+
+model WeeklyArchive {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  weekId      String?  @unique @db.Uuid
+  weekStart   DateTime @db.Date
+  weekEnd     DateTime @db.Date
+  // Snapshot of every task's progress/semaphore/KPI for the week, grouped by department.
+  data        Json
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  week      Week?     @relation(fields: [weekId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, weekStart])
+  @@map("weekly_archives")
+}
+
+// ─── Weekly cycle ───────────────────────────────────────────────────────────
+// Monday-Saturday in the workspace timezone. Created automatically each
+// Monday, closed (archived) by an ADMIN; an archived week is read-only.
+
+model Week {
+  id           String     @id @default(uuid()) @db.Uuid
+  workspaceId  String     @db.Uuid
+  mondayDate   DateTime   @db.Date
+  weekNumber   Int
+  year         Int
+  status       WeekStatus @default(ACTIVE)
+  archivedAt   DateTime?
+  archivedById String?    @db.Uuid
+  // null = created by the scheduler.
+  createdById  String?    @db.Uuid
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  workspace    Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks        Task[]               @relation("WeekTasks")
+  carriedTasks Task[]               @relation("CarriedTasks")
+  kpis         Kpi[]
+  functions    DepartmentFunction[]
+  observations TaskObservation[]
+  archive      WeeklyArchive?
+  reports      WeeklyReport[]
+  kpiSnapshots WeekKpiSnapshot[]
+
+  @@unique([workspaceId, mondayDate])
+  @@index([workspaceId, status])
+  @@map("weeks")
+}
+
+// ② A department's KPI for one week. The real value is recorded on Saturday.
+model Kpi {
+  id             String   @id @default(uuid()) @db.Uuid
+  workspaceId    String   @db.Uuid
+  weekId         String   @db.Uuid
+  departmentId   String   @db.Uuid
+  title          String   @db.VarChar(120)
+  description    String?  @db.VarChar(500)
+  type           KpiType  @default(RESULT)
+  unit           String?  @db.VarChar(20)
+  target         Decimal  @db.Decimal(14, 4)
+  actual         Decimal? @db.Decimal(14, 4)
+  // Tardanzas, food cost, multas: meeting the target means staying at or under it.
+  lesserIsBetter Boolean  @default(false)
+  order          Int      @default(0)
+  recordedAt     DateTime?
+  recordedById   String?  @db.Uuid
+  createdById    String?  @db.Uuid
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  workspace  Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  week       Week       @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@index([weekId, departmentId])
+  @@map("kpis")
+}
+
+// ③ A recurring duty of the area, marked Sí / Parcial / No on Saturday.
+model DepartmentFunction {
+  id           String               @id @default(uuid()) @db.Uuid
+  workspaceId  String               @db.Uuid
+  weekId       String               @db.Uuid
+  departmentId String               @db.Uuid
+  title        String               @db.VarChar(160)
+  description  String?              @db.VarChar(500)
+  frequency    FunctionFrequency    @default(WEEKLY)
+  // null = not marked yet.
+  fulfilled    FunctionFulfillment?
+  observation  String?              @db.VarChar(500)
+  order        Int                  @default(0)
+  markedAt     DateTime?
+  markedById   String?              @db.Uuid
+  createdById  String?              @db.Uuid
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  workspace  Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  week       Week       @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@index([weekId, departmentId])
+  @@map("department_functions")
+}
+
+// The responsible person's note on a task for one week (the "Obs." column).
+model TaskObservation {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  taskId      String   @db.Uuid
+  weekId      String   @db.Uuid
+  observation String   @db.VarChar(1000)
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  week      Week      @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  createdBy User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([taskId, weekId])
+  @@map("task_observations")
+}
+
+model ExcelImport {
+  id                String            @id @default(uuid()) @db.Uuid
+  workspaceId       String            @db.Uuid
+  uploadedById      String            @db.Uuid
+  filename          String            @db.VarChar(255)
+  fileKey           String            @db.VarChar(512)
+  uploadedAt        DateTime          @default(now())
+  rawData           Json
+  detectedTasks     Json
+  mappedTasksCount  Int               @default(0)
+  unmappedRowsCount Int               @default(0)
+  mappingLog        Json?
+  // PROCESSING while parsing → PENDING (awaiting review) → COMPLETED once confirmed; FAILED if unreadable.
+  status            ExcelImportStatus @default(PROCESSING)
+  errorMessage      String?
+  totalRows         Int               @default(0)
+  createdCount      Int               @default(0)
+  skippedCount      Int               @default(0)
+  confirmedAt       DateTime?
+  confirmedById     String?           @db.Uuid
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  uploadedBy User      @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  tasks      Task[]
+
+  @@index([workspaceId, createdAt])
+  @@map("excel_imports")
+}
+
+// ─── Performance extension ──────────────────────────────────────────────────
+
+model UserPerformanceSnapshot {
+  id                      String         @id @default(uuid()) @db.Uuid
+  workspaceId             String         @db.Uuid
+  userId                  String         @db.Uuid
+  departmentId            String?        @db.Uuid
+  snapshotDate            DateTime       @default(now())
+  period                  SnapshotPeriod
+  tasksCompletedInPeriod  Int            @default(0)
+  tasksAssignedInPeriod   Int            @default(0)
+  onTimeCompletionRate    Float          @default(0)
+  lateCompletionRate      Float          @default(0)
+  avgTaskDurationHours    Float?
+  medianTaskDurationHours Float?
+  collaborationScore      Int            @default(0)
+  kpisRecorded            Int            @default(0)
+  overdueTasks            Int            @default(0)
+  blockedTasks            Int            @default(0)
+  commentsWritten         Int            @default(0)
+  isArchived              Boolean        @default(false)
+  createdAt               DateTime       @default(now())
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, userId, snapshotDate, period])
+  @@index([workspaceId, period, snapshotDate])
+  @@map("user_performance_snapshots")
+}
+
+model TaskPerformanceMetric {
+  id                        String             @id @default(uuid()) @db.Uuid
+  taskId                    String             @unique @db.Uuid
+  workspaceId               String             @db.Uuid
+  departmentId              String?            @db.Uuid
+  completionEfficiencyScore Float
+  priorityImpact            Priority
+  complexityCategory        ComplexityCategory
+  deadlineAdherence         DeadlineAdherence
+  assignedUserId            String?            @db.Uuid
+  createdByUserId           String             @db.Uuid
+  createdAt                 DateTime           @default(now())
+  completedAt               DateTime
+  isArchived                Boolean            @default(false)
+
+  task         Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  workspace    Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  assignedUser User?       @relation("MetricAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  createdBy    User        @relation("MetricCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, completedAt])
+  @@map("task_performance_metrics")
+}
+
+// Reserved for Phase 2 (Gap 12). Structure only — nothing reads or writes it yet.
+model Webhook {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  url         String
+  events      String[]
+  secretKey   String   @db.VarChar(255)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("webhooks")
+}
+
+// ─── Performance surveys (Phase 1) ──────────────────────────────────────────
+// A template (questions) is written by an ADMIN and frozen once ACTIVE. Each
+// Survey is one evaluation of one person by one evaluator: a self-assessment
+// (evaluator = evaluated) or a manager review. Completed surveys roll up into
+// the person's PerformanceReview for the quarter (see surveys/scoring.ts for
+// how Survey.dualScore relates to PerformanceReview.overallDualScore).
+
+enum SurveyTemplateStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum SurveyQuestionType {
+  LIKERT_5
+  LIKERT_7
+  // 0–100
+  NUMERIC
+  TEXT
+  // Order the question's options; not scored.
+  RANKING
+}
+
+enum SurveyType {
+  SELF_ASSESSMENT
+  MANAGER_REVIEW
+}
+
+enum SurveyStatus {
+  SCHEDULED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum PerformanceRating {
+  EXCEEDS_EXPECTATIONS
+  MEETS_EXPECTATIONS
+  DEVELOPING
+  NEEDS_IMPROVEMENT
+  NOT_YET_RATED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model SurveyTemplate {
+  id          String               @id @default(uuid()) @db.Uuid
+  workspaceId String               @db.Uuid
+  name        String               @db.VarChar(120)
+  description String?              @db.VarChar(1000)
+  status      SurveyTemplateStatus @default(DRAFT)
+  createdById String               @db.Uuid
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User             @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  questions SurveyQuestion[]
+  surveys   Survey[]
+
+  @@index([workspaceId, status])
+  @@index([createdById])
+  @@map("survey_templates")
+}
+
+model SurveyQuestion {
+  id             String             @id @default(uuid()) @db.Uuid
+  templateId     String             @db.Uuid
+  questionNumber Int
+  text           String             @db.VarChar(500)
+  questionType   SurveyQuestionType
+  // Relative weight inside the performance score (scored types only).
+  weight         Float              @default(1)
+  required       Boolean            @default(true)
+  // RANKING items.
+  options        String[]
+  createdAt      DateTime           @default(now())
+
+  template  SurveyTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  responses SurveyResponse[]
+
+  @@unique([templateId, questionNumber])
+  @@map("survey_questions")
+}
+
+model Survey {
+  id                   String       @id @default(uuid()) @db.Uuid
+  workspaceId          String       @db.Uuid
+  templateId           String       @db.Uuid
+  type                 SurveyType
+  title                String       @db.VarChar(160)
+  description          String?      @db.VarChar(1000)
+  evaluatorId          String       @db.Uuid
+  evaluatedUserId      String       @db.Uuid
+  // The evaluated person's department when the survey was created.
+  departmentId         String       @db.Uuid
+  createdById          String       @db.Uuid
+  startDate            DateTime
+  endDate              DateTime
+  // SCHEDULED → ACTIVE at startDate (scheduler) → COMPLETED on submit; CANCELLED by a manager.
+  status               SurveyStatus @default(SCHEDULED)
+  // "2026-Q3": the quarter being evaluated (default: that of startDate); the review it rolls into.
+  reviewPeriod         String       @db.VarChar(7)
+  totalQuestions       Int
+  answeredQuestions    Int          @default(0)
+  completionPercentage Float        @default(0)
+  completedAt          DateTime?
+  cancelledAt          DateTime?
+  // Module 1 snapshot taken at creation; null when it was unavailable.
+  productivityIndex    Float?
+  productivityData     Json?
+  // 0–100 from the scored answers; null when none of them was answered.
+  performanceScore     Float?
+  dualScore            Json?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  template      SurveyTemplate   @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  evaluator     User             @relation("SurveyEvaluator", fields: [evaluatorId], references: [id], onDelete: Cascade)
+  evaluatedUser User             @relation("SurveyEvaluated", fields: [evaluatedUserId], references: [id], onDelete: Cascade)
+  createdBy     User             @relation("SurveyCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  department    Department       @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  responses     SurveyResponse[]
+
+  // A composite index also serves queries on its leading column(s), so the
+  // single-column ones (workspaceId, evaluatedUserId, departmentId, status) are implied.
+  @@index([workspaceId, status, createdAt])
+  @@index([templateId])
+  @@index([evaluatorId, status])
+  @@index([evaluatedUserId, createdAt])
+  @@index([evaluatedUserId, reviewPeriod, status])
+  @@index([departmentId, status])
+  @@index([status, startDate])
+  @@index([status, endDate])
+  @@index([createdById])
+  @@map("surveys")
+}
+
+// One answer per question; saved as a draft while the survey is open and
+// locked when it is submitted (an ADMIN may still correct it).
+model SurveyResponse {
+  id           String   @id @default(uuid()) @db.Uuid
+  surveyId     String   @db.Uuid
+  questionId   String   @db.Uuid
+  respondentId String   @db.Uuid
+  // number (LIKERT_*, NUMERIC), string (TEXT) or string[] (RANKING).
+  value        Json
+  comment      String?  @db.VarChar(2000)
+  answeredAt   DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  survey     Survey         @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  question   SurveyQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  respondent User           @relation(fields: [respondentId], references: [id], onDelete: Cascade)
+
+  @@unique([surveyId, questionId])
+  @@index([questionId])
+  @@index([respondentId])
+  @@map("survey_responses")
+}
+
+// A person's consolidated evaluation for one quarter, recomputed whenever one
+// of their surveys is completed. The evaluated person sees it once published.
+model PerformanceReview {
+  id                       String            @id @default(uuid()) @db.Uuid
+  workspaceId              String            @db.Uuid
+  userId                   String            @db.Uuid
+  departmentId             String?           @db.Uuid
+  reviewPeriod             String            @db.VarChar(7)
+  // Latest Module 1 snapshot among the period's surveys.
+  performanceData          Json?
+  surveysCompleted         Int               @default(0)
+  surveysInitiated         Int               @default(0)
+  selfAssessmentScore      Float?
+  managerReviewScore       Float?
+  overallPerformanceScore  Float?
+  overallProductivityIndex Float?
+  overallDualScore         Float?
+  performanceRating        PerformanceRating @default(NOT_YET_RATED)
+  riskLevel                RiskLevel?
+  managerComments          String?           @db.VarChar(4000)
+  employeeComments         String?           @db.VarChar(4000)
+  strengths                String[]
+  areasForImprovement      String[]
+  developmentGoals         String[]
+  nextReviewDate           DateTime?         @db.Date
+  publishedAt              DateTime?
+  publishedById            String?           @db.Uuid
+  // CR-04: the scores changed after publication (another survey of the quarter
+  // was submitted). The before/after of each change is in ActivityLog
+  // (PERFORMANCE_REVIEW_RECALCULATED).
+  lastRecalculatedAt       DateTime?
+  recalculationCount       Int               @default(0)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User        @relation("ReviewSubject", fields: [userId], references: [id], onDelete: Cascade)
+  department  Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  publishedBy User?       @relation("ReviewPublisher", fields: [publishedById], references: [id], onDelete: SetNull)
+
+  @@unique([userId, reviewPeriod])
+  @@index([workspaceId, reviewPeriod, departmentId])
+  @@index([workspaceId, performanceRating])
+  @@index([departmentId])
+  @@index([publishedById])
+  @@map("performance_reviews")
+}
+
+// ─── Objectives & key results (Phase 2) ─────────────────────────────────────
+// Quarterly OKRs in a cascade: COMPANY → AREA (a department) → PERSON. Progress
+// is the mean of its key results' progress, stored on every change; the status
+// (on track / at risk / off track) depends on the date too, so it is derived on
+// read from progress vs. the time elapsed in the quarter (see okrs/okr-progress.ts).
+
+enum OkrLevel {
+  COMPANY
+  AREA
+  PERSON
+}
+
+model Okr {
+  id           String    @id @default(uuid()) @db.Uuid
+  workspaceId  String    @db.Uuid
+  // "2026-Q4"
+  period       String    @db.VarChar(7)
+  level        OkrLevel
+  parentId     String?   @db.Uuid
+  // AREA: the area. PERSON: the person's area when created.
+  departmentId String?   @db.Uuid
+  // PERSON only.
+  ownerUserId  String?   @db.Uuid
+  title        String    @db.VarChar(200)
+  description  String?   @db.VarChar(2000)
+  // Optional; the quarter's last day otherwise.
+  deadline     DateTime? @db.Date
+  // 0–100, mean of the key results.
+  progress     Float     @default(0)
+  completedAt  DateTime?
+  createdById  String    @db.Uuid
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  workspace  Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parent     Okr?         @relation("OkrCascade", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children   Okr[]        @relation("OkrCascade")
+  department Department?  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  owner      User?        @relation("OkrOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  createdBy  User         @relation("OkrCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  keyResults KeyResult[]
+  checkIns   OkrCheckIn[]
+
+  @@index([workspaceId, period, level])
+  @@index([parentId])
+  @@index([departmentId, period])
+  @@index([ownerUserId, period])
+  @@index([createdById])
+  @@map("okrs")
+}
+
+model KeyResult {
+  id         String   @id @default(uuid()) @db.Uuid
+  okrId      String   @db.Uuid
+  order      Int
+  title      String   @db.VarChar(200)
+  unit       String?  @db.VarChar(20)
+  // Progress = (current − start) / (target − start); target < start means "lower is better".
+  startValue Float    @default(0)
+  target     Float
+  current    Float    @default(0)
+  updatedAt  DateTime @updatedAt
+
+  okr Okr @relation(fields: [okrId], references: [id], onDelete: Cascade)
+
+  @@index([okrId, order])
+  @@map("key_results")
+}
+
+// A weekly progress update: the key results' new values plus notes, with the
+// progress it produced (so the history can be charted).
+model OkrCheckIn {
+  id        String   @id @default(uuid()) @db.Uuid
+  okrId     String   @db.Uuid
+  authorId  String   @db.Uuid
+  progress  Float
+  // [{ keyResultId, previous, current }]
+  values    Json
+  notes     String?  @db.VarChar(2000)
+  createdAt DateTime @default(now())
+
+  okr    Okr  @relation(fields: [okrId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([okrId, createdAt])
+  @@index([authorId])
+  @@map("okr_check_ins")
+}
+
+// ─── Weekly Excel reports (MVP Fase 2) ──────────────────────────────────────
+// The week's workbook, generated automatically when an ADMIN closes the week
+// (or on demand), stored for 30 days and downloaded through the API (ADMIN
+// only). Deleting is soft (restorable until it expires); the cleanup job then
+// removes the file and stamps purgedAt, keeping the row for the audit trail.
+
+enum ReportSource {
+  WEEK_CLOSED
+  MANUAL
+}
+
+model WeeklyReport {
+  id            String       @id @default(uuid()) @db.Uuid
+  workspaceId   String       @db.Uuid
+  weekId        String       @db.Uuid
+  source        ReportSource
+  filename      String       @db.VarChar(255)
+  storageKey    String       @db.VarChar(512)
+  sizeBytes     Int
+  // Rows written and sheets, for the NOTAS sheet and support.
+  rowCount      Int
+  sheetCount    Int
+  // null = the system (automatic on close).
+  generatedById String?      @db.Uuid
+  createdAt     DateTime     @default(now())
+  expiresAt     DateTime
+  deletedAt     DateTime?
+  deletedById   String?      @db.Uuid
+  // File removed from storage (expired). The row stays for the audit trail.
+  purgedAt      DateTime?
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  week        Week      @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  generatedBy User?     @relation("ReportGenerator", fields: [generatedById], references: [id], onDelete: SetNull)
+  deletedBy   User?     @relation("ReportDeleter", fields: [deletedById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([weekId])
+  @@index([expiresAt, purgedAt])
+  @@index([generatedById])
+  @@index([deletedById])
+  @@map("weekly_reports")
+}
+
+// ─── Week KPI snapshots (MVP Fase 4) ────────────────────────────────────────
+// The headline numbers of a closed week, one row per area plus one for the
+// whole company (departmentKey "ALL"), written when the week is closed. The
+// history charts and trends read these few columns instead of loading and
+// parsing every week's full WeeklyArchive JSON. Immutable, like the archive.
+
+model WeekKpiSnapshot {
+  id                 String     @id @default(uuid()) @db.Uuid
+  workspaceId        String     @db.Uuid
+  weekId             String     @db.Uuid
+  // A department id, or "ALL" for the company (NULLs aren't unique in Postgres).
+  departmentKey      String     @db.VarChar(36)
+  departmentName     String?    @db.VarChar(80)
+  // Fractions 0–1, as in the weekly index (null = nothing to measure).
+  indexValue         Float?
+  taskProgress       Float?
+  kpiCompliance      Float?
+  functionCompliance Float?
+  semaphore          Semaphore?
+  tasksTotal         Int
+  tasksDue           Int
+  tasksDone          Int
+  tasksOverdue       Int
+  createdAt          DateTime   @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  week      Week      @relation(fields: [weekId], references: [id], onDelete: Cascade)
+
+  @@unique([weekId, departmentKey])
+  @@index([workspaceId, weekId])
+  @@map("week_kpi_snapshots")
+}
