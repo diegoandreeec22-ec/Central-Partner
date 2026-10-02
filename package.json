@@ -5,7 +5,7 @@
     "apps/*"
   ],
   "scripts": {
-    "postinstall": "npx prisma generate",
+    "postinstall": "npx prisma generate --schema apps/api/prisma/schema.prisma",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "dev:api": "npm run dev -w @central-partner/api",
