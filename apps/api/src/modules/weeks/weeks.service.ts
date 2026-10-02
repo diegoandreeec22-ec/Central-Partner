@@ -51,7 +51,7 @@ async function seedWeek(tx: Tx, week: Week) {
     where: { workspaceId: week.workspaceId, deletedAt: null },
     select: { id: true, headId: true },
   });
-  const activeIds = departments.map((d) => d.id);
+  const activeIds = departments.map((d: typeof departments[number]) => d.id);
   const previous = await tx.week.findFirst({
     where: { workspaceId: week.workspaceId, mondayDate: { lt: week.mondayDate } },
     orderBy: { mondayDate: 'desc' },
@@ -105,13 +105,13 @@ async function seedWeek(tx: Tx, week: Week) {
   });
   if (!director) return;
   const heads = await tx.user.findMany({
-    where: { id: { in: departments.map((d) => d.headId).filter((id): id is string => !!id) }, deletedAt: null },
+    where: { id: { in: departments.map((d: typeof departments[number]) => d.headId).filter((id): id is string => !!id) }, deletedAt: null },
     select: { id: true, role: true, departmentId: true },
   });
   const validHead = (d: (typeof departments)[number]) =>
     heads.find((h) => h.id === d.headId && h.role !== 'VIEWER' && (h.role === 'ADMIN' || h.departmentId === d.id))?.id ?? null;
   await tx.task.createMany({
-    data: departments.map((d) => ({
+    data: departments.map((d: typeof departments[number]) => ({
       workspaceId: week.workspaceId,
       departmentId: d.id,
       weekId: week.id,
@@ -289,7 +289,7 @@ export function closableAt(week: Week, timeZone: string): Date {
 export async function closureReport(user: AuthUser, week: Week, now = new Date()) {
   const data = await buildWeekData(prisma, week, user.workspaceTimezone, null, now);
   const today = localDay(now, user.workspaceTimezone);
-  const departments: (ClosureIssue & { complete: boolean })[] = data.departments.map((d) => {
+  const departments: (ClosureIssue & { complete: boolean })[] = data.departments.map((d: typeof departments[number]) => {
     const issue: ClosureIssue = {
       departmentId: d.id,
       departmentName: d.name,
