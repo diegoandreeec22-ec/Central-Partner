@@ -87,7 +87,7 @@ export interface WeekData {
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
 const mean = (xs: (number | null)[]) => {
   const v = xs.filter((x): x is number => x !== null);
-  return v.length ? round4(v.reduce((a, b) => a + b, 0) / v.length) : null;
+  return v.length ? round4(v.reduce((a: number, b: number) => a + b, 0) / v.length) : null;
 };
 
 export function trendOf(current: number | null, previous: number | null): Trend | null {
@@ -149,13 +149,13 @@ export async function buildWeekData(
       })
     : [];
   const previousCompletion = new Map(
-    previousKpis.map((k) => [`${k.departmentId}:${normalize(k.title)}`, kpiCompletion(Number(k.target), num(k.actual), k.lesserIsBetter)]),
+    previousKpis.map((k: typeof previousKpis[number]) => [`${k.departmentId}:${normalize(k.title)}`, kpiCompletion(Number(k.target), num(k.actual), k.lesserIsBetter)]),
   );
 
-  const result: WeekDepartment[] = departments.map((d) => {
-    const deptTasks = tasks.filter((t) => t.departmentId === d.id);
-    const deptKpis = kpis.filter((k) => k.departmentId === d.id);
-    const deptFunctions = functions.filter((f) => f.departmentId === d.id);
+  const result: WeekDepartment[] = departments.map((d: typeof departments[number]) => {
+    const deptTasks = tasks.filter((t: typeof tasks[number]) => t.departmentId === d.id);
+    const deptKpis = kpis.filter((k: typeof kpis[number]) => k.departmentId === d.id);
+    const deptFunctions = functions.filter((f: typeof functions[number]) => f.departmentId === d.id);
     const metrics = areaMetrics({
       tasks: deptTasks,
       kpis: deptKpis.map((k) => ({ target: Number(k.target), actual: num(k.actual), lesserIsBetter: k.lesserIsBetter })),
@@ -170,7 +170,7 @@ export async function buildWeekData(
       color: d.color,
       head: d.head && !d.head.deletedAt ? { id: d.head.id, displayName: d.head.displayName } : null,
       metrics,
-      tasks: deptTasks.map((t) => ({
+      tasks: deptTasks.map((t: typeof deptTasks[number]) => ({
         id: t.id,
         title: t.title,
         status: t.status,
@@ -185,7 +185,7 @@ export async function buildWeekData(
         sourceType: t.sourceType,
         observation: t.observations[0]?.observation ?? null,
       })),
-      kpis: deptKpis.map((k) => {
+      kpis: deptKpis.map((k: typeof deptKpis[number]) => {
         const completion = kpiCompletion(Number(k.target), num(k.actual), k.lesserIsBetter);
         return {
           id: k.id,
@@ -203,7 +203,7 @@ export async function buildWeekData(
           recordedAt: k.recordedAt,
         };
       }),
-      functions: deptFunctions.map((f) => ({
+      functions: deptFunctions.map((f: typeof deptFunctions[number]) => ({
         id: f.id,
         title: f.title,
         description: f.description,
@@ -217,11 +217,11 @@ export async function buildWeekData(
   });
 
   // The company index weighs every area equally, like the director's sheet.
-  const areas = result.map((d) => d.metrics);
-  const index = mean(areas.map((m) => m.index));
+  const areas = result.map((d: typeof result[number]) => d.metrics);
+  const index = mean(areas.map((m: typeof areas[number]) => m.index));
   const areasBySemaphore = { GREEN: 0, YELLOW: 0, RED: 0, NONE: 0 };
   for (const m of areas) areasBySemaphore[m.semaphore === 'GRAY' || !m.semaphore ? 'NONE' : m.semaphore]++;
-  const sum = (k: keyof AreaMetrics['tasks']) => areas.reduce((n, m) => n + m.tasks[k], 0);
+  const sum = (k: keyof AreaMetrics['tasks']) => areas.reduce((n: number, m: typeof areas[number]) => n + m.tasks[k], 0);
 
   return {
     week: {
@@ -235,9 +235,9 @@ export async function buildWeekData(
     today,
     departments: result,
     overall: {
-      taskProgress: mean(areas.map((m) => m.taskProgress)),
-      kpiCompliance: mean(areas.map((m) => m.kpiCompliance)),
-      functionCompliance: mean(areas.map((m) => m.functionCompliance)),
+      taskProgress: mean(areas.map((m: typeof areas[number]) => m.taskProgress)),
+      kpiCompliance: mean(areas.map((m: typeof areas[number]) => m.kpiCompliance)),
+      functionCompliance: mean(areas.map((m: typeof areas[number]) => m.functionCompliance)),
       index,
       semaphore: index === null ? null : semaphoreFor(index * 100),
       tasks: { total: sum('total'), due: sum('due'), done: sum('done'), overdue: sum('overdue'), blocked: sum('blocked') },

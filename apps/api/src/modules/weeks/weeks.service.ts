@@ -64,7 +64,7 @@ async function seedWeek(tx: Tx, week: Week) {
     ]);
     if (kpis.length) {
       await tx.kpi.createMany({
-        data: kpis.map((k) => ({
+        data: kpis.map((k: typeof kpis[number]) => ({
           workspaceId: k.workspaceId,
           weekId: week.id,
           departmentId: k.departmentId,
@@ -81,7 +81,7 @@ async function seedWeek(tx: Tx, week: Week) {
     }
     if (functions.length) {
       await tx.departmentFunction.createMany({
-        data: functions.map((f) => ({
+        data: functions.map((f: typeof functions[number]) => ({
           workspaceId: f.workspaceId,
           weekId: week.id,
           departmentId: f.departmentId,
@@ -105,7 +105,7 @@ async function seedWeek(tx: Tx, week: Week) {
   });
   if (!director) return;
   const heads = await tx.user.findMany({
-    where: { id: { in: departments.map((d: typeof departments[number]) => d.headId).filter((id): id is string => !!id) }, deletedAt: null },
+    where: { id: { in: departments.map((d: typeof departments[number]) => d.headId).filter((id): id is string => id !== null) }, deletedAt: null },
     select: { id: true, role: true, departmentId: true },
   });
   const validHead = (d: (typeof departments)[number]) =>
